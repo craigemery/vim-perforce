@@ -12,13 +12,14 @@ endif
 let g:vim_perforce_loaded = 1
 
 if !exists('g:vim_perforce_executable')
-  let g:vim_perforce_executable = 'p4'
+  let g:vim_perforce_executable = 'p4.exe'
 endif
 
 " Available commands
 
 command P4info call perforce#P4CallInfo()
 command P4edit call perforce#P4CallEdit()
+command P4add call perforce#P4CallAdd()
 command P4revert call perforce#P4CallRevert()
 command P4movetocl call perforce#P4CallPromptMoveToChangelist()
 
@@ -54,6 +55,10 @@ endif
 if !exists('g:perforce_debug')
   let g:perforce_debug = 0
 endif
+" can we use pyx and have P4 installed in Python?
+if !exists('g:vim_perforce_pyx')
+  let g:vim_perforce_pyx = 0
+endif
 
 " Events
 
@@ -73,9 +78,38 @@ augroup END
 
 " Utilities
 
+if has("pythonx")
+  pythonx << EEOOFF
+try:
+  from pprint import pformat
+  import vim
+  import P4 as Perforce
+  CONN = None
+  def P4():
+    global CONN
+    CONN = Perforce.P4()
+    CONN.connect()
+    return CONN
+  CONN = P4()
+  vim.command("let g:vim_perforce_pyx=1")
+except ImportError:
+  pass
+EEOOFF
+endif
+
 function! s:P4Shell(cmd, ...)
   call s:debug(g:vim_perforce_executable . ' ' . a:cmd . ' ' . join(a:000, " "))
   return substitute(call('system', [g:vim_perforce_executable . ' ' . a:cmd] + a:000), '\_s*$', '', '')
+endfunction
+
+function! s:P4PyxCurrentBuffer(cmdlist)
+  if g:perforce_use_relative_paths
+    let l:filename = expand('%')
+  else
+    let l:filename = expand('%:p')
+  endif
+  pyx P4REPLY=P4().run(vim.eval("a:cmdlist"), vim.eval("l:filename"))
+  return pyxeval("P4REPLY")
 endfunction
 
 function! s:P4ShellCurrentBuffer(cmd, ...)
@@ -150,15 +184,25 @@ endfunction
 " P4 functions
 
 function! perforce#P4GetUser()
-  let l:output = s:P4Shell('info')
-  let l:m = matchlist(output, "User name: \\([a-zA-Z]\\+\\).*")
-  if len(l:m) > 1 && !empty(l:m[1])
-    return l:m[1]
+  if g:vim_perforce_pyx
+    pyx P4REPLY=P4().run_info()[0]["userName"]
+    return pyxeval("P4REPLY")
+  else
+    let l:output = s:P4Shell('info')
+    let l:m = matchlist(output, "User name: \\([a-zA-Z]\\+\\).*")
+    if len(l:m) > 1 && !empty(l:m[1])
+      return l:m[1]
+    endif
   endif
 endfunction
 
 function! perforce#P4CallInfo()
-  let l:output = s:P4Shell('info')
+  if g:vim_perforce_pyx
+    pyx P4REPLY=pformat(P4().run_info()[0])
+    let l:output = pyxeval("P4REPLY")
+  else
+    let l:output = s:P4Shell('info')
+  endif
   echo l:output
 endfunction
 
@@ -195,7 +239,11 @@ function! perforce#P4CallEditWithPrompt()
 endfunction
 
 function! perforce#P4CallEdit()
-  let l:output = s:P4ShellCurrentBuffer('edit')
+  if g:vim_perforce_pyx
+    let l:output = s:P4PyxCurrentBuffer(['edit'])
+  else
+    let l:output = s:P4ShellCurrentBuffer('edit')
+  endif
   if s:P4OutputHasError(l:output) == 1
     return 1
   endif
@@ -207,8 +255,29 @@ function! perforce#P4CallEdit()
   call s:msg('File open for edit.')
 endfunction
 
+function! perforce#P4CallAdd()
+  if g:vim_perforce_pyx
+    let l:output = s:P4PyxCurrentBuffer(['add'])
+  else
+    let l:output = s:P4ShellCurrentBuffer('add')
+  endif
+  if s:P4OutputHasError(l:output) == 1
+    return 1
+  endif
+  if v:shell_error
+    call s:err('Unable to open file for add.', l:output)
+    return 1
+  endif
+  silent! setlocal noreadonly autoread modifiable
+  call s:msg('File open for add.')
+endfunction
+
 function! perforce#P4CallRevert()
-  let l:output = s:P4ShellCurrentBuffer('diff -f -sa')
+  if g:vim_perforce_pyx
+    let l:output = s:P4PyxCurrentBuffer(['diff', '-f', '-sa'])
+  else
+    let l:output = s:P4ShellCurrentBuffer('diff -f -sa')
+  endif
   if s:P4OutputHasError(l:output) == 1
     return 1
   endif
@@ -221,7 +290,11 @@ function! perforce#P4CallRevert()
   if !l:do_revert
     return
   endif
-  let l:output = s:P4ShellCurrentBuffer('revert')
+  if g:vim_perforce_pyx
+    let l:output = s:P4PyxCurrentBuffer(['revert'])
+  else
+    let l:output = s:P4ShellCurrentBuffer('revert')
+  endif
   if s:P4OutputHasError(l:output) == 1
     return 1
   elseif v:shell_error
@@ -314,9 +387,17 @@ endfunction
 function! perforce#P4CallMoveToChangelist(changelist)
   " read-only files haven't been opened yet
   if &readonly
-    let l:output = s:P4ShellCurrentBuffer('edit -c ' . a:changelist)
+    if g:vim_perforce_pyx
+      let l:output = s:P4PyxCurrentBuffer(['edit', '-c', a:changelist])
+    else
+      let l:output = s:P4ShellCurrentBuffer('edit -c ' . a:changelist)
+    endif
   else
-    let l:output = s:P4ShellCurrentBuffer('reopen -c ' . a:changelist)
+    if g:vim_perforce_pyx
+      let l:output = s:P4PyxCurrentBuffer(['reopen', '-c', a:changelist])
+    else
+      let l:output = s:P4ShellCurrentBuffer('reopen -c ' . a:changelist)
+    endif
   endif
   if v:shell_error
     call s:err('Unable to move file to Changelist ' . a:changelist)
